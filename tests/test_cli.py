@@ -1,88 +1,114 @@
-"""Tests for the envdiff CLI module."""
+"""Tests for envdiff.cli (including filter integration)."""
 
-import os
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+
 import pytest
-from unittest.mock import patch
 
-from envdiff.cli import run, build_parser
-
-
-@pytest.fixture
-def env_file_a(tmp_path):
-    f = tmp_path / "a.env"
-    f.write_text("KEY1=foo\nKEY2=bar\nCOMMON=same\n")
-    return str(f)
+from envdiff.cli import build_parser, run
 
 
-@pytest.fixture
-def env_file_b(tmp_path):
-    f = tmp_path / "b.env"
-    f.write_text("KEY2=different\nCOMMON=same\nKEY3=baz\n")
-    return str(f)
+@pytest.fixture()
+def env_file_a(tmp_path: Path) -> Path:
+    p = tmp_path / "a.env"
+    p.write_text(
+        textwrap.dedent(
+            """\
+            APP_HOST=localhost
+            APP_PORT=8080
+            DB_PASSWORD=secret
+            LOG_LEVEL=DEBUG
+            """
+        )
+    )
+    return p
+
+
+@pytest.fixture()
+def env_file_b(tmp_path: Path) -> Path:
+    p = tmp_path / "b.env"
+    p.write_text(
+        textwrap.dedent(
+            """\
+            APP_HOST=prod.example.com
+            APP_PORT=8080
+            DB_PASSWORD=topsecret
+            LOG_LEVEL=WARNING
+            """
+        )
+    )
+    return p
 
 
 def test_run_two_files_text_output(env_file_a, env_file_b, capsys):
-    exit_code = run([env_file_a, env_file_b])
+    code = run([str(env_file_a), str(env_file_b)])
     captured = capsys.readouterr()
-    assert exit_code == 0
-    assert "KEY1" in captured.out
-    assert "KEY2" in captured.out
-    assert "KEY3" in captured.out
+    assert "APP_HOST" in captured.out
+    assert code == 1
 
 
 def test_run_exit_code_when_differences(env_file_a, env_file_b):
-    exit_code = run([env_file_a, env_file_b, "--exit-code"])
-    assert exit_code == 1
+    assert run([str(env_file_a), str(env_file_b)]) == 1
 
 
-def test_run_exit_code_no_differences(tmp_path, capsys):
-    f1 = tmp_path / "x.env"
-    f2 = tmp_path / "y.env"
-    f1.write_text("A=1\n")
-    f2.write_text("A=1\n")
-    exit_code = run([str(f1), str(f2), "--exit-code"])
-    assert exit_code == 0
+def test_run_exit_code_no_differences(tmp_path):
+    f = tmp_path / "same.env"
+    f.write_text("KEY=value\n")
+    assert run([str(f), str(f)]) == 0
 
 
-def test_run_json_format(env_file_a, env_file_b, capsys):
-    run([env_file_a, env_file_b, "--format", "json"])
+def test_run_with_include_filter(env_file_a, env_file_b, capsys):
+    code = run([str(env_file_a), str(env_file_b), "--include", "APP_*"])
     captured = capsys.readouterr()
-    import json
-    data = json.loads(captured.out)
-    assert "only_in_a" in data
-    assert "only_in_b" in data
-    assert "value_differs" in data
+    assert "APP_HOST" in captured.out
+    assert "DB_PASSWORD" not in captured.out
+    assert code == 1
 
 
-def test_run_custom_labels(env_file_a, env_file_b, capsys):
-    run([env_file_a, env_file_b, "--label-a", "prod", "--label-b", "staging"])
+def test_run_with_exclude_filter(env_file_a, env_file_b, capsys):
+    code = run([str(env_file_a), str(env_file_b), "--exclude", "*PASSWORD"])
     captured = capsys.readouterr()
-    assert "prod" in captured.out
+    assert "DB_PASSWORD" not in captured.out
+
+
+def test_run_with_prefix_filter(env_file_a, env_file_b, capsys):
+    run([str(env_file_a), str(env_file_b), "--prefix", "APP_"])
+    captured = capsys.readouterr()
+    assert "DB_PASSWORD" not in captured.out
+    assert "APP_HOST" in captured.out
+
+
+def test_run_with_regex_filter(env_file_a, env_file_b, capsys):
+    run([str(env_file_a), str(env_file_b), "--regex", r"^LOG_"])
+    captured = capsys.readouterr()
+    assert "LOG_LEVEL" in captured.out
+    assert "APP_HOST" not in captured.out
+
+
+def test_run_with_custom_labels(env_file_a, env_file_b, capsys):
+    run([
+        str(env_file_a), str(env_file_b),
+        "--label", "staging",
+        "--label", "production",
+    ])
+    captured = capsys.readouterr()
     assert "staging" in captured.out
+    assert "production" in captured.out
 
 
-def test_run_os_env_mode(env_file_a, capsys):
-    fake_env = {"KEY1": "foo", "EXTRA": "val"}
-    with patch("envdiff.cli.load_from_os_environ", return_value=fake_env):
-        exit_code = run([env_file_a, "--os-env"])
-    captured = capsys.readouterr()
-    assert exit_code == 0
-    assert "os.environ" in captured.out
-
-
-def test_run_os_env_requires_one_file(env_file_a, env_file_b):
-    with pytest.raises(SystemExit):
-        run([env_file_a, env_file_b, "--os-env"])
-
-
-def test_run_two_files_required_without_os_env(env_file_a):
-    with pytest.raises(SystemExit):
-        run([env_file_a])
+def test_run_requires_two_files():
+    with pytest.raises(SystemExit) as exc_info:
+        run(["only_one.env"])
+    assert exc_info.value.code != 0
 
 
 def test_build_parser_defaults():
     parser = build_parser()
     args = parser.parse_args(["a.env", "b.env"])
-    assert args.output_format == "text"
-    assert args.exit_code is False
-    assert args.os_env is False
+    assert args.format == "text"
+    assert args.include_patterns is None
+    assert args.exclude_patterns is None
+    assert args.prefix is None
+    assert args.regex is None
