@@ -116,3 +116,18 @@ def test_load_returns_string_values(tmp_path):
     loaded = load_archive(p)
     entry = loaded.get("env")
     assert isinstance(entry.env["PORT"], str)
+
+
+def test_load_missing_file_raises(tmp_path):
+    """Loading a non-existent archive file should raise FileNotFoundError."""
+    p = tmp_path / "does_not_exist.json"
+    with pytest.raises(FileNotFoundError):
+        load_archive(p)
+
+
+def test_load_invalid_json_raises(tmp_path):
+    """Loading a file with invalid JSON should raise a ValueError."""
+    p = tmp_path / "bad_archive.json"
+    p.write_text("not valid json {{{")
+    with pytest.raises((ValueError, json.JSONDecodeError)):
+        load_archive(p)
